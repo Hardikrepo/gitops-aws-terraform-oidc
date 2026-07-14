@@ -87,15 +87,41 @@ data "aws_iam_policy_document" "permissions" {
       "s3:PutBucketPublicAccessBlock",
       "s3:GetBucket*",
       "s3:ListBucket",
+      # These four read actions drop "Bucket" from the IAM action name
+      # even though their API operation names have it (e.g. API
+      # GetBucketLifecycleConfiguration -> IAM action
+      # s3:GetLifecycleConfiguration) - not covered by GetBucket* above.
+      "s3:GetAccelerateConfiguration",
+      "s3:GetEncryptionConfiguration",
+      "s3:GetLifecycleConfiguration",
+      "s3:GetReplicationConfiguration",
     ]
     resources = ["arn:aws:s3:::${local.resource_prefix}-*"]
   }
 
   statement {
-    sid       = "AppSSM"
-    effect    = "Allow"
-    actions   = ["ssm:PutParameter", "ssm:GetParameter", "ssm:DeleteParameter", "ssm:AddTagsToResource"]
+    sid    = "AppSSM"
+    effect = "Allow"
+    actions = [
+      "ssm:PutParameter",
+      "ssm:GetParameter",
+      # AWS docs: ListTagsForResource on a parameter also requires the
+      # plural GetParameters (batch) action, not just singular GetParameter.
+      "ssm:GetParameters",
+      "ssm:DeleteParameter",
+      "ssm:AddTagsToResource",
+      "ssm:ListTagsForResource",
+    ]
     resources = ["arn:aws:ssm:*:*:parameter/${local.resource_prefix}/*"]
+  }
+
+  # DescribeParameters doesn't support resource-level scoping (AWS requires
+  # "*" here) - it's a list/search API, not a per-parameter read.
+  statement {
+    sid       = "AppSSMDescribe"
+    effect    = "Allow"
+    actions   = ["ssm:DescribeParameters"]
+    resources = ["*"]
   }
 
   # Lets plan-reviewer (running under this role in terraform-plan.yml) call
