@@ -5,7 +5,13 @@
 [![Authentication](https://img.shields.io/badge/AWS_Auth-OIDC-success)](#identity-and-trust-model)
 [![Environments](https://img.shields.io/badge/Environments-dev%20%7C%20staging%20%7C%20prod-blue)](#environment-promotion)
 
-Production-oriented GitOps foundation for provisioning AWS infrastructure with Terraform and GitHub Actions. GitHub jobs obtain short-lived AWS credentials through OpenID Connect (OIDC), so the repository does not store long-lived `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` credentials.
+Production-oriented GitOps foundation for provisioning AWS infrastructure with Terraform and GitHub Actions. GitHub jobs obtain short-lived AWS credentials through OpenID Connect (OIDC) — no long-lived `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` is ever stored in this repository. Every change is proposed as a pull request, automatically planned and AI-reviewed for risk, and promoted through `dev` → `staging` → `prod` with a human approval gate in front of production.
+
+### Watch the walkthrough
+
+[![GitOps for AWS with OIDC — video walkthrough](https://img.youtube.com/vi/GN6KTudLY3s/maxresdefault.jpg)](https://youtu.be/GN6KTudLY3s)
+
+Click the thumbnail above (or [youtu.be/GN6KTudLY3s](https://youtu.be/GN6KTudLY3s)) for a video walkthrough of the project — useful if you'd rather watch it end-to-end than read the docs first.
 
 > New here, or non-technical? [`OVERVIEW.md`](OVERVIEW.md) explains what this project does and how to get started without needing to read Terraform or IAM policy.
 
