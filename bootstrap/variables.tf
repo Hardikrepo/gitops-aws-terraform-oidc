@@ -13,13 +13,13 @@ variable "project" {
 variable "github_org" {
   description = "GitHub organization (or user) that owns the repo allowed to assume roles."
   type        = string
-  default     = "your-org"
+  default     = "Hardikrepo"
 }
 
 variable "github_repo" {
   description = "GitHub repository name (without org) allowed to assume roles."
   type        = string
-  default     = "your-repo"
+  default     = "gitops-aws-terraform-oidc"
 }
 
 variable "environments" {
