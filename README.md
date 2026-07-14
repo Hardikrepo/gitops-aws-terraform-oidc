@@ -18,6 +18,9 @@ or [youtu.be/GN6KTudLY3s](https://youtu.be/GN6KTudLY3s) directly.
 
 > New here, or non-technical? [`OVERVIEW.md`](OVERVIEW.md) explains what this project does and how to get started without needing to read Terraform or IAM policy.
 
+> [!NOTE]
+> **Project status:** the code, pipelines, and AI agents described below are complete and were previously deployed and verified end-to-end against a real AWS account. All AWS resources have since been torn down (`terraform destroy` across `envs/*` and `bootstrap`) to stop incurring any footprint while idle — nothing is currently running. See [First-time bootstrap](#first-time-bootstrap) to redeploy; it's the same one-time process either way.
+
 ## Key capabilities
 
 - Exact repository-and-environment OIDC trust conditions.
@@ -26,7 +29,8 @@ or [youtu.be/GN6KTudLY3s](https://youtu.be/GN6KTudLY3s) directly.
 - Versioned, encrypted Terraform state in Amazon S3.
 - Terraform state locking with Amazon DynamoDB.
 - GitHub Environment approval gates for sensitive environments.
-- AI-assisted Terraform plan review and stale-lock diagnosis.
+- AI-assisted Terraform plan review and stale-lock diagnosis, via two Claude-backed agents (`agents/plan-reviewer`, `agents/lock-doctor`).
+- Both agents authenticate to Claude through Amazon Bedrock using each job's own short-lived OIDC credentials — no `ANTHROPIC_API_KEY` or any other stored secret.
 - Human-approved state-lock remediation.
 
 > [!IMPORTANT]
@@ -129,19 +133,28 @@ repo:Hardikrepo/gitops-aws-terraform-oidc:environment:prod
 
 The resulting credentials are temporary and inherit only the assumed role's permissions.
 
-## Current AWS resources
+## AWS resources this project creates
 
-| Component | Purpose | Controls |
-|---|---|---|
-| AWS IAM OIDC provider | Establishes GitHub as a federated identity provider | Audience restricted to `sts.amazonaws.com` |
-| Environment IAM roles | Deployment identities for `dev`, `staging`, and `prod` | Exact GitHub subject and namespaced permissions |
-| Lock-monitor IAM role | Unattended lock inspection | `dynamodb:GetItem` + `bedrock:InvokeModel` on one model, nothing else |
-| Amazon S3 state bucket | Shared Terraform backend | Versioning, SSE-S3, public-access block, `force_destroy = false` |
-| Amazon DynamoDB table | Terraform state locking | `LockID` partition key and on-demand billing |
-| Environment S3 buckets | Demonstration application workload | Versioning, SSE-S3, and public-access block |
-| Systems Manager parameters | Records the deployed commit | Environment-namespaced parameter path |
+Not currently live (see the status note above) — this is what `bootstrap` and `envs/*` create when applied, 29 resources total (14 + 5 per environment × 3):
 
-The current workload does not deploy a VPC, subnet, NAT gateway, load balancer, or compute service. Its AWS services do not require a workload VPC.
+| Component | Created by | Purpose | Controls |
+|---|---|---|---|
+| AWS IAM OIDC provider | `bootstrap` | Establishes GitHub as a federated identity provider | Audience restricted to `sts.amazonaws.com` |
+| Environment IAM roles ×3 | `bootstrap` | Deployment identities for `dev`, `staging`, and `prod` | Exact GitHub subject and namespaced permissions |
+| Lock-monitor IAM role | `bootstrap` | Unattended lock inspection | `dynamodb:GetItem` + `bedrock:InvokeModel` on one model, nothing else |
+| Amazon S3 state bucket | `bootstrap` | Shared Terraform backend | Versioning, SSE-S3, public-access block, `force_destroy = false` |
+| Amazon DynamoDB table | `bootstrap` | Terraform state locking | `LockID` partition key and on-demand billing |
+| Environment S3 buckets ×3 | `envs/*` | Demonstration application workload | Versioning, SSE-S3, and public-access block |
+| Systems Manager parameters ×3 | `envs/*` | Records the deployed commit | Environment-namespaced parameter path |
+
+The workload does not deploy a VPC, subnet, NAT gateway, load balancer, or compute service. Its AWS services do not require a workload VPC.
+
+## Cost
+
+At this scale, AWS spend is effectively zero: S3/DynamoDB/IAM usage here sits well within free-tier-equivalent volumes (a handful of KB-sized state objects, near-zero DynamoDB request volume), and there's no compute, VPC, or load balancer to bill for. The two variable costs are:
+
+- **Amazon Bedrock** — pay-per-call, only when an agent actually assesses something (plan-reviewer on real Terraform diffs, lock-doctor only when a lock looks genuinely stale). Each call is a few hundred tokens; cost per assessment is a fraction of a cent.
+- **GitHub Actions minutes** — free/unlimited on a public repo (this one is public). On a private repo, `lock-doctor`'s 30-minute schedule alone would use roughly 1,000+ minutes/month, worth checking against your plan's included minutes.
 
 ## Repository structure
 
@@ -163,7 +176,9 @@ gitops-aws-oidc/
 ├── modules/
 │   ├── app-stack/               # S3 and deployed-commit workload
 │   └── oidc-role/               # Environment role/policy factory
-└── docs/architecture/           # Architecture documentation
+├── docs/architecture/png/       # Diagrams referenced in this README
+├── README.md                    # This file - technical reference
+└── OVERVIEW.md                  # Plain-English guide for non-technical readers
 ```
 
 ## Identity and trust model
