@@ -1,0 +1,59 @@
+name: terraform-apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "envs/**"
+      - "modules/**"
+      - ".github/workflows/terraform-apply.yml"
+
+permissions:
+  id-token: write # required to fetch the OIDC token
+  contents: read
+
+jobs:
+  apply:
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # apply envs one at a time: dev/staging catch issues before prod
+      matrix:
+        environment: [dev, staging, prod]
+
+    runs-on: ubuntu-latest
+    # GitHub Environment protection rules (Settings > Environments) are
+    # the actual promotion gate here - e.g. require a manual reviewer
+    # on `prod` so merges to main don't auto-deploy production.
+    environment: ${{ matrix.environment }}
+
+    defaults:
+      run:
+        working-directory: envs/${{ matrix.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-apply-${{ matrix.environment }}-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ vars.TF_LOCK_TABLE }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+
+      - name: Terraform Apply
+        run: |
+          terraform apply \
+            -var="deployed_commit=${{ github.sha }}" \
+            -input=false \
+            -auto-approve
