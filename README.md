@@ -9,9 +9,12 @@ Production-oriented GitOps foundation for provisioning AWS infrastructure with T
 
 ### Watch the walkthrough
 
-[![GitOps for AWS with OIDC — video walkthrough](https://img.youtube.com/vi/GN6KTudLY3s/maxresdefault.jpg)](https://youtu.be/GN6KTudLY3s)
+<iframe width="560" height="315" src="https://www.youtube.com/embed/GN6KTudLY3s" title="GitOps for AWS with OIDC" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
 
-Click the thumbnail above (or [youtu.be/GN6KTudLY3s](https://youtu.be/GN6KTudLY3s)) for a video walkthrough of the project — useful if you'd rather watch it end-to-end than read the docs first.
+If the player above doesn't render (GitHub strips `<iframe>` on the repo
+page for most viewers), click through instead:
+[![GitOps for AWS with OIDC — video walkthrough](https://img.youtube.com/vi/GN6KTudLY3s/maxresdefault.jpg)](https://youtu.be/GN6KTudLY3s)
+or [youtu.be/GN6KTudLY3s](https://youtu.be/GN6KTudLY3s) directly.
 
 > New here, or non-technical? [`OVERVIEW.md`](OVERVIEW.md) explains what this project does and how to get started without needing to read Terraform or IAM policy.
 
