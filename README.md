@@ -84,6 +84,27 @@ alerting/dashboards.
 
 ![GitHub Actions to AWS OIDC trust architecture](docs/architecture/png/02-oidc-trust-architecture.png)
 
+This diagram walks the trust handshake in six steps: (1) the GitHub Actions
+runner for a given environment starts the `configure-aws-credentials` step,
+(2) GitHub issues a signed OIDC JWT scoped to that job (`aud`, `sub`, `exp`,
+`jti` claims), (3) AWS's registered IAM OIDC provider recognizes GitHub as
+the issuer, (4) AWS STS's `AssumeRoleWithWebIdentity` call is made, (5) the
+matching environment IAM role's trust policy is checked — the role only
+assumes if both `aud` and `sub` match exactly — and temporary credentials
+(access key, secret key, session token) are returned to the runner, which
+then (6) uses them, scoped to that role's permissions only, against AWS.
+
+> [!NOTE]
+> Two labels in this diagram are illustrative rather than exact: the role
+> naming shown (`gitops-aws-terraform-oidc-<env>-role`) doesn't match this
+> repo's actual Terraform-created names (`gitops-aws-oidc-<env>-gha` — the
+> `project` variable, not the GitHub repo name, drives the prefix), and
+> zone 6's "Amazon DynamoDB (Environment: `<env>`)" implies a lock table
+> per environment, whereas the deployed setup uses **one shared** DynamoDB
+> table across all three (see the `[!IMPORTANT]` callout at the top). The
+> trust-condition logic (`aud`/`sub` matching, one role per environment) is
+> exact.
+
 GitHub Actions calls `sts:AssumeRoleWithWebIdentity`. AWS accepts the request only when both token conditions match:
 
 ```text
