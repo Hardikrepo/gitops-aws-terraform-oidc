@@ -7,6 +7,8 @@
 
 Production-oriented GitOps foundation for provisioning AWS infrastructure with Terraform and GitHub Actions. GitHub jobs obtain short-lived AWS credentials through OpenID Connect (OIDC), so the repository does not store long-lived `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` credentials.
 
+> New here, or non-technical? [`OVERVIEW.md`](OVERVIEW.md) explains what this project does and how to get started without needing to read Terraform or IAM policy.
+
 ## Key capabilities
 
 - Exact repository-and-environment OIDC trust conditions.
