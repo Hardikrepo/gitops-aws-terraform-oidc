@@ -27,14 +27,56 @@ Production-oriented GitOps foundation for provisioning AWS infrastructure with T
 
 ![GitOps AWS OIDC end-to-end architecture](docs/architecture/png/01-end-to-end-architecture.png)
 
-1. A developer opens or updates a pull request.
-2. GitHub Actions creates environment-specific jobs.
-3. Each job requests a signed OIDC token from GitHub.
-4. AWS STS validates the token through the AWS IAM OIDC provider.
-5. The job assumes only the IAM role assigned to its GitHub Environment.
-6. Terraform reads its environment state and acquires a DynamoDB lock.
-7. Approved changes are promoted through `dev`, `staging`, and `prod`.
-8. The deployed commit SHA is recorded in AWS Systems Manager Parameter Store.
+The diagram is organized into six numbered zones, connected by solid arrows
+(execution/data flow) and dashed arrows (trust, monitoring, or approval
+relationships — see the Legend in the bottom-right corner).
+
+**1. Developer and Pull Request.** A developer pushes code to the GitHub
+repository and opens a pull request. The PR fires a webhook event into
+GitHub Actions.
+
+**2. GitHub Actions and Environments.** The workflow run is scoped to three
+GitHub Environments — `dev`, `staging`, `prod` — each with "exact trust
+isolation." `prod` additionally sits behind a Production Approval Gate. Each
+environment's job requests a signed OIDC token carrying `aud` (audience),
+`sub` (subject), and the environment name, and reports status/results back
+to the pull request.
+
+**3. AWS IAM OIDC Federation through AWS STS `AssumeRoleWithWebIdentity`.**
+Inside the AWS Cloud trust boundary, GitHub's own OIDC provider
+(`token.actions.githubusercontent.com`) is registered as a federated
+identity. Three IAM roles each trust exactly one environment's OIDC subject
+(`GitHubActions-DevRole`, `-StagingRole`, `-ProdRole` in the diagram's
+naming). AWS STS exchanges the presented token for temporary credentials via
+`AssumeRoleWithWebIdentity` — nothing is issued until the token's `aud`
+and `sub` both match.
+
+**4. Terraform Remote State.** A shared, versioned, encrypted S3 bucket
+holds Terraform state, partitioned by per-environment key prefix
+(`envs/dev/terraform.tfstate`, `envs/staging/terraform.tfstate`,
+`envs/prod/terraform.tfstate`), paired with a DynamoDB table that arbitrates
+state locks so concurrent runs can't corrupt state.
+
+**5. Dev / Staging / Prod application resources.** Each environment is its
+own column: the environment's IAM role provisions a namespaced S3
+application bucket and an SSM Parameter Store entry recording the deployed
+commit SHA — kept structurally identical across all three environments so
+promotion is a like-for-like diff, not a rewrite.
+
+**6. Read-Only Lock Doctor Monitoring.** A read-only IAM role watches the
+state bucket and lock table without write access, feeding
+alerting/dashboards.
+
+> [!NOTE]
+> This diagram illustrates the target/enterprise-shaped version of the
+> architecture (separate accounts for state, application, and monitoring;
+> KMS encryption; CloudWatch alarms). As the `[!IMPORTANT]` callout above
+> states, what's actually deployed today is simpler: **one shared AWS
+> account**, SSE-S3 (`AES256`) rather than KMS, and zone 6's diagnosis
+> surfaces as a GitHub Issue (via the `lock-doctor` agent) rather than
+> CloudWatch. The trust-isolation and state-locking mechanics (zones 1-5)
+> match the deployed Terraform exactly; the account topology and
+> observability tooling in zone 6 are the forward-looking parts.
 
 ### OIDC trust architecture
 
