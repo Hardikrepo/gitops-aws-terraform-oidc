@@ -84,4 +84,4 @@ jobs:
             --plan-text plan.txt \
             --repo "${{ github.repository }}" \
             --pr-number "${{ github.event.pull_request.number }}" \
-            --anthropic-api-key "${{ secrets.ANTHROPIC_API_KEY }}"
+            --aws-region "${{ vars.AWS_REGION }}"

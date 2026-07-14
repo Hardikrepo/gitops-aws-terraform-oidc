@@ -1,1 +1,1 @@
-anthropic>=0.40
+anthropic[bedrock]>=0.40

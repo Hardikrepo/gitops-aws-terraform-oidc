@@ -34,3 +34,9 @@ variable "lock_table_arn" {
   description = "ARN of the shared DynamoDB lock table."
   type        = string
 }
+
+variable "bedrock_model_id" {
+  description = "Bedrock foundation model ID the plan-reviewer agent is allowed to invoke from this role."
+  type        = string
+  default     = "anthropic.claude-sonnet-5"
+}

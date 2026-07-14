@@ -20,7 +20,8 @@ jobs:
     # No `environment:` here on purpose - this is a read-only detector
     # that must run unattended on a schedule, so it can't sit behind a
     # human-approval gate. See bootstrap/main.tf for the role's scope
-    # (dynamodb:GetItem on the lock table, nothing else).
+    # (dynamodb:GetItem on the lock table, plus bedrock:InvokeModel on
+    # one model for the assessment - nothing else).
 
     steps:
       - uses: actions/checkout@v4
@@ -46,4 +47,4 @@ jobs:
             --state-bucket "${{ vars.TF_STATE_BUCKET }}" \
             --lock-table "${{ vars.TF_LOCK_TABLE }}" \
             --envs "dev,staging,prod" \
-            --anthropic-api-key "${{ secrets.ANTHROPIC_API_KEY }}"
+            --aws-region "${{ vars.AWS_REGION }}"

@@ -1,197 +1,258 @@
-# gitops-aws-oidc
+# GitOps for AWS with GitHub OIDC
 
-GitOps for AWS with Terraform, promoted through GitHub Actions that assume
-an AWS IAM role via OIDC — no long-lived `AWS_ACCESS_KEY_ID` /
-`AWS_SECRET_ACCESS_KEY` stored anywhere. Includes two small Claude-backed
-agents: `lock-doctor` (detects and diagnoses stuck Terraform state locks) and
-`plan-reviewer` (flags risky changes in a PR's Terraform plan before merge).
+[![Terraform](https://img.shields.io/badge/Terraform-%3E%3D1.7-844FBA?logo=terraform)](https://developer.hashicorp.com/terraform)
+[![AWS Provider](https://img.shields.io/badge/AWS_Provider-~%3E5.0-FF9900?logo=amazonaws)](https://registry.terraform.io/providers/hashicorp/aws/latest)
+[![Authentication](https://img.shields.io/badge/AWS_Auth-OIDC-success)](#identity-and-trust-model)
+[![Environments](https://img.shields.io/badge/Environments-dev%20%7C%20staging%20%7C%20prod-blue)](#environment-promotion)
 
-**Repo:** `Hardikrepo/gitops-aws-terraform-oidc` (GitHub) · **Local path:** `~/gitops-aws-oidc`
+Production-oriented GitOps foundation for provisioning AWS infrastructure with Terraform and GitHub Actions. GitHub jobs obtain short-lived AWS credentials through OpenID Connect (OIDC), so the repository does not store long-lived `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` credentials.
 
-## How the trust works
+## Key capabilities
 
-1. AWS trusts GitHub's OIDC provider (`token.actions.githubusercontent.com`), created once in `bootstrap/`.
-2. Each environment (`dev`, `staging`, `prod`) gets its own IAM role. The role's trust policy only accepts tokens whose `sub` claim is exactly `repo:<org>/<repo>:environment:<env>` — i.e. a workflow job that explicitly declared `environment: <env>`.
-3. Each role's permissions are scoped to resources namespaced `gitops-aws-oidc-<env>-*`, plus its slice of the shared state bucket/lock table. A `dev` job cannot touch `prod` resources even if the workflow is compromised.
-4. GitHub Environment protection rules (Settings → Environments → `prod` → required reviewers) are the actual promotion gate — merges to `main` don't auto-deploy prod without a human approval.
-5. A separate, narrower `lock-monitor` role (read-only, not environment-gated) backs the `lock-doctor` detection workflow — see [Disaster recovery](#disaster-recovery-stuck-state-lock).
+- Exact repository-and-environment OIDC trust conditions.
+- Separate least-privilege IAM roles for `dev`, `staging`, and `prod`.
+- Sequential promotion from development to production.
+- Versioned, encrypted Terraform state in Amazon S3.
+- Terraform state locking with Amazon DynamoDB.
+- GitHub Environment approval gates for sensitive environments.
+- AI-assisted Terraform plan review and stale-lock diagnosis.
+- Human-approved state-lock remediation.
 
-## Project structure and how each part runs
+> [!IMPORTANT]
+> The Terraform source is authoritative. The current implementation uses one AWS account, SSE-S3 (`AES256`), a shared state bucket, a shared DynamoDB lock table, and GitHub Issues for lock alerts. Separate workload accounts, customer-managed KMS keys, and CloudWatch alerting visible in presentation artwork are enterprise evolution options, not currently deployed resources.
 
+## Architecture
+
+### End-to-end GitOps architecture
+
+![GitOps AWS OIDC end-to-end architecture](docs/architecture/png/01-end-to-end-architecture.png)
+
+1. A developer opens or updates a pull request.
+2. GitHub Actions creates environment-specific jobs.
+3. Each job requests a signed OIDC token from GitHub.
+4. AWS STS validates the token through the AWS IAM OIDC provider.
+5. The job assumes only the IAM role assigned to its GitHub Environment.
+6. Terraform reads its environment state and acquires a DynamoDB lock.
+7. Approved changes are promoted through `dev`, `staging`, and `prod`.
+8. The deployed commit SHA is recorded in AWS Systems Manager Parameter Store.
+
+### OIDC trust architecture
+
+![GitHub Actions to AWS OIDC trust architecture](docs/architecture/png/02-oidc-trust-architecture.png)
+
+GitHub Actions calls `sts:AssumeRoleWithWebIdentity`. AWS accepts the request only when both token conditions match:
+
+```text
+aud = sts.amazonaws.com
+sub = repo:Hardikrepo/gitops-aws-terraform-oidc:environment:<environment>
 ```
-bootstrap/                  one-time, local, your own AWS creds
-  main.tf                     OIDC provider, state bucket, lock table,
-                               per-env IAM roles, lock-monitor role
-  variables.tf                 github_org / github_repo / project / region
-  outputs.tf                   state_bucket, lock_table, role_arns, lock_monitor_role_arn
 
-modules/                    reusable Terraform modules — never applied directly
-  oidc-role/                   IAM role + least-privilege policy factory, used by bootstrap
-  app-stack/                    the actual workload, used by envs/*
+For production, the exact subject is:
 
-envs/                       one Terraform root per environment — applied via CI
-  dev/  staging/  prod/        own state file, own IAM role, applied independently
-
-agents/lock-doctor/         Python script — invoked by lock-doctor.yml, not run standalone in CI
-  check_lock.py                reads the lock table, asks Claude to assess staleness, opens an issue
-  requirements.txt              boto3, anthropic
-
-agents/plan-reviewer/       Python script — invoked by terraform-plan.yml, not run standalone in CI
-  review_plan.py                classifies plan changes, asks Claude to assess risk, posts/updates a PR comment
-  requirements.txt              anthropic
-
-.github/workflows/          automation entry points
-  terraform-plan.yml           runs on every PR touching envs/** or modules/** (also runs plan-reviewer)
-  terraform-apply.yml          runs on every push to main touching envs/** or modules/**
-  lock-doctor.yml               runs on a 30-minute schedule + after plan/apply + on demand
-  unlock-approved.yml           runs only when a human triggers it manually
+```text
+repo:Hardikrepo/gitops-aws-terraform-oidc:environment:prod
 ```
 
-### `bootstrap/` — execute once, locally, by hand
+The resulting credentials are temporary and inherit only the assumed role's permissions.
 
-This is the only piece that doesn't go through OIDC (chicken-and-egg: CI needs
-a role to exist before it can assume one). Run it with your own AWS
-credentials:
+## Current AWS resources
+
+| Component | Purpose | Controls |
+|---|---|---|
+| AWS IAM OIDC provider | Establishes GitHub as a federated identity provider | Audience restricted to `sts.amazonaws.com` |
+| Environment IAM roles | Deployment identities for `dev`, `staging`, and `prod` | Exact GitHub subject and namespaced permissions |
+| Lock-monitor IAM role | Unattended lock inspection | `dynamodb:GetItem` + `bedrock:InvokeModel` on one model, nothing else |
+| Amazon S3 state bucket | Shared Terraform backend | Versioning, SSE-S3, public-access block, `force_destroy = false` |
+| Amazon DynamoDB table | Terraform state locking | `LockID` partition key and on-demand billing |
+| Environment S3 buckets | Demonstration application workload | Versioning, SSE-S3, and public-access block |
+| Systems Manager parameters | Records the deployed commit | Environment-namespaced parameter path |
+
+The current workload does not deploy a VPC, subnet, NAT gateway, load balancer, or compute service. Its AWS services do not require a workload VPC.
+
+## Repository structure
+
+```text
+gitops-aws-oidc/
+├── .github/workflows/
+│   ├── terraform-plan.yml       # PR validation, plan, and risk review
+│   ├── terraform-apply.yml      # Sequential dev → staging → prod apply
+│   ├── lock-doctor.yml          # Scheduled read-only lock diagnosis
+│   └── unlock-approved.yml      # Manual, approved force-unlock
+├── agents/
+│   ├── plan-reviewer/           # AI-assisted plan assessment
+│   └── lock-doctor/             # Lock detection and issue creation
+├── bootstrap/                   # One-time trust and backend foundation
+├── envs/
+│   ├── dev/
+│   ├── staging/
+│   └── prod/
+├── modules/
+│   ├── app-stack/               # S3 and deployed-commit workload
+│   └── oidc-role/               # Environment role/policy factory
+└── docs/architecture/           # Architecture documentation
+```
+
+## Identity and trust model
+
+Each environment role has two independent protections:
+
+1. **Trust isolation:** only tokens from the expected repository and GitHub Environment are accepted.
+2. **Permission isolation:** the role can access only its state prefix and environment-namespaced resources.
+
+| Environment | OIDC subject suffix | State key | Resource namespace |
+|---|---|---|---|
+| `dev` | `environment:dev` | `envs/dev/terraform.tfstate` | `gitops-aws-oidc-dev-*` |
+| `staging` | `environment:staging` | `envs/staging/terraform.tfstate` | `gitops-aws-oidc-staging-*` |
+| `prod` | `environment:prod` | `envs/prod/terraform.tfstate` | `gitops-aws-oidc-prod-*` |
+
+Environment roles can read/write their state, list their permitted S3 prefix, operate the lock item, manage namespaced application buckets, manage namespaced Systems Manager parameters, and invoke one Bedrock model (used by the plan-reviewer agent during `terraform-plan.yml`).
+
+## Delivery workflows
+
+### Pull-request plan
+
+`terraform-plan.yml` runs for relevant pull-request changes. For each environment it:
+
+1. Assumes the environment IAM role through OIDC.
+2. Initializes the S3 backend.
+3. Runs `terraform fmt -check -recursive` and `terraform validate`.
+4. Creates the Terraform plan.
+5. Converts the plan to JSON and runs the AI-assisted plan reviewer.
+6. Posts an informational risk assessment to the pull request.
+
+The reviewer highlights deletions, replacements, and security-sensitive changes. It supports human review and does not replace approval controls.
+
+### Environment promotion
+
+`terraform-apply.yml` runs after relevant changes reach `main`:
+
+```text
+main → dev apply → staging apply → production approval → prod apply
+```
+
+The workflow uses `max-parallel: 1`. Configure required reviewers on the GitHub `prod` Environment to enforce the production gate.
+
+## First-time bootstrap
+
+Bootstrap runs locally because CI cannot assume an AWS role until the OIDC provider and roles exist.
+
+### Prerequisites
+
+- Terraform 1.7 or newer.
+- AWS credentials authorized to create IAM, S3, and DynamoDB resources.
+- GitHub repository `Hardikrepo/gitops-aws-terraform-oidc`.
+- GitHub Environments named `dev`, `staging`, and `prod`.
+
+### Apply
 
 ```bash
-aws sts get-caller-identity        # confirm you're authenticated
+aws sts get-caller-identity
 cd bootstrap
 terraform init
-terraform plan                     # review what will be created
+terraform plan
 terraform apply
 ```
 
-Creates 14 resources: the OIDC provider, the shared S3 state bucket +
-DynamoDB lock table, one IAM role per environment (`dev`/`staging`/`prod`),
-and the read-only `lock-monitor` role. Note the outputs — `state_bucket`,
-`lock_table`, `role_arns`, `lock_monitor_role_arn` — you'll need all of them
-in the GitHub setup step below. Re-run `terraform apply` here only when you
-change `bootstrap/main.tf` itself (e.g. adding a new environment).
+Record these outputs:
 
-### `modules/oidc-role/` and `modules/app-stack/` — not executed directly
+```text
+state_bucket
+lock_table
+role_arns
+lock_monitor_role_arn
+```
 
-These are Terraform modules, referenced by `source = "../modules/..."` from
-`bootstrap/main.tf` and `envs/*/main.tf`. They apply automatically as part of
-whichever root module calls them — there's nothing to run inside these
-directories themselves.
+## GitHub configuration
 
-### `envs/{dev,staging,prod}/` — execute via CI (or manually for one env)
+Create GitHub Environments `dev`, `staging`, and `prod`; add required reviewers to `prod` and optionally `staging`.
 
-Normal path is automatic: `terraform-plan.yml` / `terraform-apply.yml` drive
-these. To run one by hand (e.g. to debug), you need the backend values from
-`bootstrap`'s outputs:
+| Scope | Type | Name | Value |
+|---|---|---|---|
+| Each environment | Variable | `AWS_ROLE_ARN` | Matching `role_arns` value |
+| Repository | Variable | `AWS_REGION` | `us-east-1` by default |
+| Repository | Variable | `TF_STATE_BUCKET` | Bootstrap `state_bucket` output |
+| Repository | Variable | `TF_LOCK_TABLE` | Bootstrap `lock_table` output |
+| Repository | Variable | `LOCK_MONITOR_ROLE_ARN` | Bootstrap monitor-role output |
+
+No `ANTHROPIC_API_KEY` secret is required. Both AI-assisted agents call Claude
+through Amazon Bedrock, authenticated with the same short-lived OIDC-issued
+AWS credentials each job already has (`AnthropicBedrockMantle(aws_region=...)`
+picks these up automatically) — see `InvokeClaudeViaBedrock` in
+`modules/oidc-role/main.tf` and `bootstrap/main.tf`. This does mean Bedrock
+model access for `anthropic.claude-sonnet-5` must be enabled for this AWS
+account/region in the Bedrock console before either agent's first real call —
+that's an AWS-side entitlement, not something Terraform manages.
+
+Workflow permission `id-token: write` permits a job to request an OIDC token; it does not itself grant AWS access.
+
+## Manual environment operation
+
+CI is the normal path. For troubleshooting one environment:
 
 ```bash
 cd envs/dev
+
 terraform init \
-  -backend-config="bucket=<state_bucket output>" \
-  -backend-config="dynamodb_table=<lock_table output>" \
+  -backend-config="bucket=<state_bucket>" \
+  -backend-config="dynamodb_table=<lock_table>" \
   -backend-config="region=us-east-1"
-terraform plan  -var="deployed_commit=local-test"
+
+terraform plan -var="deployed_commit=local-test"
 terraform apply -var="deployed_commit=local-test"
 ```
 
-Manual runs still need AWS credentials for that environment's role (or your
-own admin credentials) — CI is what actually uses the OIDC role.
+Manual execution requires suitable AWS credentials.
 
-### `.github/workflows/terraform-plan.yml` — automatic, on pull request
+## State-lock detection and recovery
 
-Triggers on any PR touching `envs/**`, `modules/**`, or the workflow file
-itself. Matrix over `[dev, staging, prod]`; each job assumes that
-environment's OIDC role, runs `fmt -check`, `validate`, and `plan`, then
-hands the plan to `plan-reviewer` (below). No manual action needed — just
-open the PR.
+`lock-doctor.yml` runs every 30 minutes, after plan/apply workflows, and on manual dispatch. It assumes the read-only monitor role and calls only `dynamodb:GetItem`. When a lock appears stale, it correlates the lock with GitHub Actions activity, requests an AI-assisted assessment, and opens or updates a GitHub Issue labeled `state-lock`.
 
-### `agents/plan-reviewer/review_plan.py` — invoked by terraform-plan.yml (or manually)
+It never deletes a lock automatically.
 
-Runs automatically as the last step of every `terraform-plan.yml` job. It
-reads the `terraform show -json` plan, classifies each resource change
-(create/update/delete/replace), flags deletions, replacements, and updates to
-IAM/security/public-access resource types, and — only if there are real
-changes — asks Claude to write a 2-4 sentence risk assessment. The result is
-posted as a single PR comment per environment, updated in place on every
-push (not re-posted). **It never fails the CI job or blocks the merge** —
-review failures are caught and logged, not raised, and there's no
-`risk_level` check gating anything; a human reading the PR decides what to
-do with it. To run it by hand against a plan you generated locally:
+Approved remediation:
 
-```bash
-pip install -r agents/plan-reviewer/requirements.txt
-python agents/plan-reviewer/review_plan.py \
-  --env dev \
-  --plan-json plan.json \
-  --plan-text plan.txt \
-  --repo Hardikrepo/gitops-aws-terraform-oidc \
-  --pr-number 12 \
-  --anthropic-api-key "$ANTHROPIC_API_KEY"
-```
+1. Verify that no Terraform process is active.
+2. Manually run `unlock-approved.yml`.
+3. Select the environment and provide the reported lock ID.
+4. Complete the GitHub Environment approval.
+5. The workflow runs `terraform force-unlock -force <lock_id>` using the environment role.
 
-### `.github/workflows/terraform-apply.yml` — automatic, on push to `main`
+> [!WARNING]
+> Never force-unlock state while another Terraform process is running. Concurrent state modification can corrupt Terraform state.
 
-Triggers on push to `main` (i.e. a merged PR) touching the same paths.
-Applies `dev` → `staging` → `prod` in order (`max-parallel: 1`), pausing for
-approval at any environment with a reviewer gate configured. No manual
-action needed beyond merging — and approving the prod gate, if you set one.
+## Security characteristics
 
-### `agents/lock-doctor/check_lock.py` — invoked by lock-doctor.yml (or manually)
-
-Not meant to be run by hand in normal operation, but you can for testing —
-requires AWS credentials with `dynamodb:GetItem` on the lock table, `gh` CLI
-authenticated (for issue creation), and an Anthropic API key:
-
-```bash
-pip install -r agents/lock-doctor/requirements.txt
-python agents/lock-doctor/check_lock.py \
-  --state-bucket <state_bucket output> \
-  --lock-table <lock_table output> \
-  --envs dev,staging,prod \
-  --anthropic-api-key "$ANTHROPIC_API_KEY"
-```
-
-### `.github/workflows/lock-doctor.yml` — automatic (scheduled)
-
-Runs every 30 minutes (cron), immediately after every `terraform-plan` /
-`terraform-apply` run, and on demand via the Actions tab
-(`workflow_dispatch`). Uses the read-only `lock-monitor` role — no human
-input required; it only ever opens/updates a GitHub issue.
-
-### `.github/workflows/unlock-approved.yml` — manual only
-
-Never fires automatically. Run it from the Actions tab (`workflow_dispatch`)
-with the `environment` and `lock_id` values from the issue `lock-doctor`
-opened. It reuses the same environment-gated IAM role as
-`terraform-apply.yml`, so clearing a `prod` lock still needs whatever
-reviewer approval is configured on that Environment.
-
-## First-time setup
-
-1. **Placeholders are already filled in.** `bootstrap/variables.tf` points at `github_org = "Hardikrepo"`, `github_repo = "gitops-aws-terraform-oidc"`.
-2. **Apply `bootstrap/`** as shown above. Save the four outputs.
-3. **Push this repo to GitHub** as `Hardikrepo/gitops-aws-terraform-oidc` (rename the local branch `master` → `main` first, since the workflows trigger on `main`).
-4. **Configure GitHub:**
-   - Settings → Environments: create `dev`, `staging`, `prod`; add a required-reviewer rule on `prod` (optionally `staging`).
-   - Per-Environment variable `AWS_ROLE_ARN` = the matching entry from `role_arns`.
-   - Repo-level variables: `AWS_REGION`, `TF_STATE_BUCKET` (= `state_bucket`), `TF_LOCK_TABLE` (= `lock_table`), `LOCK_MONITOR_ROLE_ARN` (= `lock_monitor_role_arn`).
-   - Repo-level secret: `ANTHROPIC_API_KEY` (used by both `lock-doctor` and `plan-reviewer`).
-5. **Open a PR** touching `envs/**` to see `terraform-plan.yml` run; **merge to `main`** to see `terraform-apply.yml` apply dev → staging → prod.
-
-## Disaster recovery: stuck state lock
-
-If a CI run gets killed mid-apply (cancelled, runner died, etc.), Terraform's
-DynamoDB lock can be left held, blocking every future plan/apply for that
-environment. Detection is automatic and read-only; remediation is manual and
-human-approved — same split as the rest of this project.
-
-- **`lock-doctor.yml`** — detects a stale-looking lock, asks Claude to weigh
-  the lock's age against the correlated GitHub Actions run status, and opens
-  a GitHub issue labeled `state-lock` with the reasoning. Never clears a lock
-  itself.
-- **`unlock-approved.yml`** — the human-triggered fix. See above.
+- No long-lived AWS credentials in GitHub.
+- Exact repository and environment conditions in IAM trust policies.
+- Short-lived, traceable STS sessions.
+- Independent deployment roles per environment.
+- Prefix- and namespace-scoped authorization.
+- Versioned and non-public Terraform state.
+- Automated read-only diagnosis separated from approved mutation.
+- Production deployment and unlock operations can share the same reviewer gate.
 
 ## Replacing the demo workload
 
-`modules/app-stack` is intentionally minimal (an S3 bucket + SSM parameter)
-so the pipeline can be proven end-to-end before real infra goes in. Anything
-you add there must keep the `gitops-aws-oidc-<environment>-*` naming
-convention, or you'll need to widen the resource ARNs in
-`modules/oidc-role/main.tf` to match.
+`modules/app-stack` proves the pipeline with an S3 bucket and Systems Manager parameter. Preserve the naming convention when adding production resources:
+
+```text
+gitops-aws-oidc-<environment>-*
+```
+
+If new resources cannot follow this namespace, deliberately update `modules/oidc-role/main.tf` and review the expanded IAM scope.
+
+## Validation
+
+```bash
+terraform fmt -recursive
+
+cd bootstrap
+terraform init -backend=false
+terraform validate
+```
+
+Validate each `envs/<environment>` root after backend initialization.
+
+## License
+
+No license file is currently included. Add an approved license before external distribution or reuse.

@@ -70,10 +70,14 @@ def read_truncated(path: str, limit: int) -> str:
     return text[:limit] + f"\n\n... truncated ({len(text) - limit} more characters)"
 
 
-def assess_with_claude(env: str, counts: dict, flagged: list, plan_text: str, api_key: str, model: str) -> dict:
-    from anthropic import Anthropic
+def assess_with_claude(env: str, counts: dict, flagged: list, plan_text: str, aws_region: str, model: str) -> dict:
+    from anthropic import AnthropicBedrockMantle
 
-    client = Anthropic(api_key=api_key)
+    # Claude via Bedrock, authenticated with this job's own OIDC-issued AWS
+    # credentials (already in the environment from configure-aws-credentials)
+    # - no separate API key/secret to manage. See modules/oidc-role's
+    # InvokeClaudeViaBedrock statement for the IAM side of this.
+    client = AnthropicBedrockMantle(aws_region=aws_region)
 
     prompt = f"""Review this Terraform plan for the "{env}" environment of an AWS GitOps project and assess its risk.
 
@@ -172,8 +176,8 @@ def main() -> int:
     parser.add_argument("--plan-text", required=True)
     parser.add_argument("--repo", required=True, help="owner/repo")
     parser.add_argument("--pr-number", required=True)
-    parser.add_argument("--anthropic-api-key", required=True)
-    parser.add_argument("--model", default="claude-sonnet-5")
+    parser.add_argument("--aws-region", required=True)
+    parser.add_argument("--model", default="anthropic.claude-sonnet-5")
     parser.add_argument("--plan-text-limit", type=int, default=15000)
     args = parser.parse_args()
 
@@ -185,7 +189,7 @@ def main() -> int:
         body = render_no_change_comment(args.env)
     else:
         plan_text = read_truncated(args.plan_text, args.plan_text_limit)
-        assessment = assess_with_claude(args.env, counts, flagged, plan_text, args.anthropic_api_key, args.model)
+        assessment = assess_with_claude(args.env, counts, flagged, plan_text, args.aws_region, args.model)
         body = render_comment(args.env, counts, assessment)
 
     upsert_comment(args.repo, args.pr_number, args.env, body)

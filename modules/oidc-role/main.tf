@@ -97,6 +97,16 @@ data "aws_iam_policy_document" "permissions" {
     actions   = ["ssm:PutParameter", "ssm:GetParameter", "ssm:DeleteParameter", "ssm:AddTagsToResource"]
     resources = ["arn:aws:ssm:*:*:parameter/${local.resource_prefix}/*"]
   }
+
+  # Lets plan-reviewer (running under this role in terraform-plan.yml) call
+  # Claude via Bedrock using the job's own OIDC-issued AWS credentials -
+  # no separate API key/secret needed. Scoped to one model, any region.
+  statement {
+    sid       = "InvokeClaudeViaBedrock"
+    effect    = "Allow"
+    actions   = ["bedrock:InvokeModel"]
+    resources = ["arn:aws:bedrock:*::foundation-model/${var.bedrock_model_id}"]
+  }
 }
 
 resource "aws_iam_role_policy" "this" {

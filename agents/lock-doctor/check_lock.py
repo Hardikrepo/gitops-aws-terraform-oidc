@@ -103,10 +103,14 @@ def get_recent_run_status(env: str) -> dict:
         return {"available": False, "error": str(exc)}
 
 
-def assess_with_claude(env: str, lock: LockInfo, run_status: dict, api_key: str, model: str) -> dict:
-    from anthropic import Anthropic
+def assess_with_claude(env: str, lock: LockInfo, run_status: dict, aws_region: str, model: str) -> dict:
+    from anthropic import AnthropicBedrockMantle
 
-    client = Anthropic(api_key=api_key)
+    # Claude via Bedrock, authenticated with this job's own OIDC-issued AWS
+    # credentials (already in the environment from configure-aws-credentials)
+    # - no separate API key/secret to manage. See modules/oidc-role's
+    # InvokeClaudeViaBedrock statement for the IAM side of this.
+    client = AnthropicBedrockMantle(aws_region=aws_region)
 
     prompt = f"""A Terraform state lock in DynamoDB has been held for {lock.age_minutes:.0f} minutes \
 in the "{env}" environment of an AWS GitOps project. Assess whether it looks like a stale lock \
@@ -205,8 +209,8 @@ def main() -> int:
     parser.add_argument("--lock-table", required=True)
     parser.add_argument("--envs", default="dev,staging,prod")
     parser.add_argument("--stale-minutes", type=float, default=15.0)
-    parser.add_argument("--anthropic-api-key", required=True)
-    parser.add_argument("--model", default="claude-sonnet-5")
+    parser.add_argument("--aws-region", required=True)
+    parser.add_argument("--model", default="anthropic.claude-sonnet-5")
     args = parser.parse_args()
 
     dynamodb = boto3.client("dynamodb")
@@ -232,7 +236,7 @@ def main() -> int:
 
         print(f"[{env}] lock held {lock.age_minutes:.0f}m - assessing")
         run_status = get_recent_run_status(env)
-        assessment = assess_with_claude(env, lock, run_status, args.anthropic_api_key, args.model)
+        assessment = assess_with_claude(env, lock, run_status, args.aws_region, args.model)
         upsert_issue(env, lock, run_status, assessment)
         print(f"[{env}] assessment: {assessment}")
 

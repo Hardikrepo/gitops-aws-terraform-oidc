@@ -27,3 +27,9 @@ variable "environments" {
   type        = list(string)
   default     = ["dev", "staging", "prod"]
 }
+
+variable "bedrock_model_id" {
+  description = "Bedrock foundation model ID the agents (lock-doctor, plan-reviewer) are allowed to invoke."
+  type        = string
+  default     = "anthropic.claude-sonnet-5"
+}
