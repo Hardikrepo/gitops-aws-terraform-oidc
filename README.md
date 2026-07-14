@@ -2,8 +2,9 @@
 
 GitOps for AWS with Terraform, promoted through GitHub Actions that assume
 an AWS IAM role via OIDC — no long-lived `AWS_ACCESS_KEY_ID` /
-`AWS_SECRET_ACCESS_KEY` stored anywhere. Includes a small Claude-backed agent
-(`lock-doctor`) that detects and diagnoses stuck Terraform state locks.
+`AWS_SECRET_ACCESS_KEY` stored anywhere. Includes two small Claude-backed
+agents: `lock-doctor` (detects and diagnoses stuck Terraform state locks) and
+`plan-reviewer` (flags risky changes in a PR's Terraform plan before merge).
 
 **Repo:** `Hardikrepo/gitops-aws-terraform-oidc` (GitHub) · **Local path:** `~/gitops-aws-oidc`
 
@@ -35,8 +36,12 @@ agents/lock-doctor/         Python script — invoked by lock-doctor.yml, not ru
   check_lock.py                reads the lock table, asks Claude to assess staleness, opens an issue
   requirements.txt              boto3, anthropic
 
+agents/plan-reviewer/       Python script — invoked by terraform-plan.yml, not run standalone in CI
+  review_plan.py                classifies plan changes, asks Claude to assess risk, posts/updates a PR comment
+  requirements.txt              anthropic
+
 .github/workflows/          automation entry points
-  terraform-plan.yml           runs on every PR touching envs/** or modules/**
+  terraform-plan.yml           runs on every PR touching envs/** or modules/** (also runs plan-reviewer)
   terraform-apply.yml          runs on every push to main touching envs/** or modules/**
   lock-doctor.yml               runs on a 30-minute schedule + after plan/apply + on demand
   unlock-approved.yml           runs only when a human triggers it manually
@@ -93,8 +98,33 @@ own admin credentials) — CI is what actually uses the OIDC role.
 
 Triggers on any PR touching `envs/**`, `modules/**`, or the workflow file
 itself. Matrix over `[dev, staging, prod]`; each job assumes that
-environment's OIDC role and runs `fmt -check`, `validate`, and `plan`. No
-manual action needed — just open the PR.
+environment's OIDC role, runs `fmt -check`, `validate`, and `plan`, then
+hands the plan to `plan-reviewer` (below). No manual action needed — just
+open the PR.
+
+### `agents/plan-reviewer/review_plan.py` — invoked by terraform-plan.yml (or manually)
+
+Runs automatically as the last step of every `terraform-plan.yml` job. It
+reads the `terraform show -json` plan, classifies each resource change
+(create/update/delete/replace), flags deletions, replacements, and updates to
+IAM/security/public-access resource types, and — only if there are real
+changes — asks Claude to write a 2-4 sentence risk assessment. The result is
+posted as a single PR comment per environment, updated in place on every
+push (not re-posted). **It never fails the CI job or blocks the merge** —
+review failures are caught and logged, not raised, and there's no
+`risk_level` check gating anything; a human reading the PR decides what to
+do with it. To run it by hand against a plan you generated locally:
+
+```bash
+pip install -r agents/plan-reviewer/requirements.txt
+python agents/plan-reviewer/review_plan.py \
+  --env dev \
+  --plan-json plan.json \
+  --plan-text plan.txt \
+  --repo Hardikrepo/gitops-aws-terraform-oidc \
+  --pr-number 12 \
+  --anthropic-api-key "$ANTHROPIC_API_KEY"
+```
 
 ### `.github/workflows/terraform-apply.yml` — automatic, on push to `main`
 
@@ -142,7 +172,7 @@ reviewer approval is configured on that Environment.
    - Settings → Environments: create `dev`, `staging`, `prod`; add a required-reviewer rule on `prod` (optionally `staging`).
    - Per-Environment variable `AWS_ROLE_ARN` = the matching entry from `role_arns`.
    - Repo-level variables: `AWS_REGION`, `TF_STATE_BUCKET` (= `state_bucket`), `TF_LOCK_TABLE` (= `lock_table`), `LOCK_MONITOR_ROLE_ARN` (= `lock_monitor_role_arn`).
-   - Repo-level secret: `ANTHROPIC_API_KEY`.
+   - Repo-level secret: `ANTHROPIC_API_KEY` (used by both `lock-doctor` and `plan-reviewer`).
 5. **Open a PR** touching `envs/**` to see `terraform-plan.yml` run; **merge to `main`** to see `terraform-apply.yml` apply dev → staging → prod.
 
 ## Disaster recovery: stuck state lock

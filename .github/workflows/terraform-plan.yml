@@ -64,4 +64,24 @@ jobs:
           terraform plan \
             -var="deployed_commit=${{ github.sha }}" \
             -input=false \
-            -no-color
+            -no-color \
+            -out=tfplan
+          terraform show -no-color tfplan > plan.txt
+          terraform show -json tfplan > plan.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Plan risk review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pip install -r "${{ github.workspace }}/agents/plan-reviewer/requirements.txt"
+          python "${{ github.workspace }}/agents/plan-reviewer/review_plan.py" \
+            --env "${{ matrix.environment }}" \
+            --plan-json plan.json \
+            --plan-text plan.txt \
+            --repo "${{ github.repository }}" \
+            --pr-number "${{ github.event.pull_request.number }}" \
+            --anthropic-api-key "${{ secrets.ANTHROPIC_API_KEY }}"
