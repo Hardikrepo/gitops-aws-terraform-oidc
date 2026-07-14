@@ -12,3 +12,8 @@ output "role_arns" {
   description = "Map of environment name -> IAM role ARN for GitHub Actions to assume via OIDC."
   value       = { for env, mod in module.env_roles : env => mod.role_arn }
 }
+
+output "lock_monitor_role_arn" {
+  description = "Read-only role ARN for the lock-doctor workflow. Set as repo variable LOCK_MONITOR_ROLE_ARN."
+  value       = aws_iam_role.lock_monitor.arn
+}

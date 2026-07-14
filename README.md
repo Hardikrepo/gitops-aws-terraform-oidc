@@ -34,9 +34,13 @@ modules/
 envs/
   dev/ staging/ prod/   one Terraform root per environment, own state file,
                          own IAM role, applied independently
+agents/
+  lock-doctor/     script behind the lock-doctor workflow (see below)
 .github/workflows/
   terraform-plan.yml    on PR: fmt/validate/plan for all three envs
   terraform-apply.yml   on push to main: apply dev -> staging -> prod, in order
+  lock-doctor.yml        scheduled: detects stuck state locks, opens a diagnosis issue
+  unlock-approved.yml    manual, human-triggered: clears a lock once approved
 ```
 
 ## First-time setup
@@ -61,12 +65,38 @@ envs/
      `role_arns[<env>]` output from step 2.
    - Repo-level (Settings → Secrets and variables → Actions → Variables):
      `AWS_REGION`, `TF_STATE_BUCKET` (= `state_bucket` output),
-     `TF_LOCK_TABLE` (= `lock_table` output).
+     `TF_LOCK_TABLE` (= `lock_table` output),
+     `LOCK_MONITOR_ROLE_ARN` (= `lock_monitor_role_arn` output).
+   - Repo-level secret: `ANTHROPIC_API_KEY` (used by lock-doctor's diagnosis step).
 
 4. Open a PR touching `envs/**` — `terraform-plan.yml` runs plan for all
    three environments using each one's scoped role. Merge to `main` —
    `terraform-apply.yml` applies dev, then staging, then prod (pausing for
    approval if you set a reviewer gate on prod).
+
+## Disaster recovery: stuck state lock
+
+If a CI run gets killed mid-apply (cancelled, runner died, etc.), Terraform's
+DynamoDB lock can be left held, blocking every future plan/apply for that
+environment. Two workflows handle this, split by autonomy level — same
+principle as the rest of this project: read is unattended, write is
+human-approved.
+
+- **`lock-doctor.yml`** runs every 30 minutes (plus after every
+  plan/apply, plus on demand). It uses a dedicated, read-only IAM role
+  (`lock_monitor_role_arn` — see `bootstrap/main.tf`) that can only
+  `dynamodb:GetItem` the lock table, nothing else, and isn't gated by a
+  GitHub Environment (it has to run unattended). If a lock looks
+  stale, it asks Claude to weigh the lock's age against the correlated
+  GitHub Actions run status and writes its reasoning — not just a
+  timeout — into a GitHub issue labeled `state-lock`. It never clears
+  a lock itself.
+- **`unlock-approved.yml`** is manual (`workflow_dispatch` only). You
+  run it by hand from the Actions tab with the `environment` and
+  `lock_id` from the issue. It reuses the *same* per-environment role
+  and `environment:` gate as `terraform-apply.yml` — so unlocking
+  `prod` still needs whatever reviewer approval you configured on that
+  Environment in step 3.
 
 ## Replacing the demo workload
 

@@ -98,3 +98,64 @@ module "env_roles" {
   state_bucket_arn = aws_s3_bucket.tf_state.arn
   lock_table_arn   = aws_dynamodb_table.tf_lock.arn
 }
+
+# --- Read-only lock-monitor role, for the lock-doctor workflow. ---
+# Deliberately NOT trusted via `environment:<name>` like the roles
+# above: this runs on a schedule with no human in the loop, so it must
+# not sit behind an environment's required-reviewer gate. It can only
+# GetItem the lock table - nothing else - so an unattended/automated
+# run of this role has nothing destructive it could do even if abused.
+# Actual remediation (DeleteItem to clear a lock) still goes through
+# the per-environment roles above, which *are* environment-gated.
+
+data "aws_iam_policy_document" "lock_monitor_trust" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    # Matches schedule/workflow_dispatch/workflow_run runs on main -
+    # those events carry `ref:refs/heads/main` in the sub claim rather
+    # than an `environment:` claim.
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["repo:${var.github_org}/${var.github_repo}:ref:refs/heads/main"]
+    }
+  }
+}
+
+resource "aws_iam_role" "lock_monitor" {
+  name               = "${var.project}-lock-monitor-gha"
+  assume_role_policy = data.aws_iam_policy_document.lock_monitor_trust.json
+
+  tags = {
+    Project   = var.project
+    ManagedBy = "terraform-bootstrap"
+  }
+}
+
+data "aws_iam_policy_document" "lock_monitor_permissions" {
+  statement {
+    sid       = "ReadLockTableOnly"
+    effect    = "Allow"
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.tf_lock.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "lock_monitor" {
+  name   = "${var.project}-lock-monitor-policy"
+  role   = aws_iam_role.lock_monitor.id
+  policy = data.aws_iam_policy_document.lock_monitor_permissions.json
+}

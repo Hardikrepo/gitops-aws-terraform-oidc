@@ -1,0 +1,57 @@
+name: unlock-approved
+
+# Human-triggered remediation for a stuck Terraform state lock,
+# following a lock-doctor issue. Never fires automatically. Reuses the
+# same per-environment IAM role and `environment:` gate as
+# terraform-apply.yml, so clearing a prod lock still requires whatever
+# approval rule is configured on the prod Environment.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment whose lock should be cleared"
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+      lock_id:
+        description: "Lock ID from the lock-doctor issue (e.g. <bucket>/envs/<env>/terraform.tfstate)"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  unlock:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    defaults:
+      run:
+        working-directory: envs/${{ inputs.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-unlock-${{ inputs.environment }}-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ vars.TF_LOCK_TABLE }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+
+      - name: Force-unlock
+        run: terraform force-unlock -force "${{ inputs.lock_id }}"

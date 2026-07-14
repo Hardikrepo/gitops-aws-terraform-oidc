@@ -1,0 +1,49 @@
+name: lock-doctor
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_run:
+    workflows: ["terraform-apply", "terraform-plan"]
+    types: [completed]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write # required to fetch the OIDC token
+  contents: read
+  issues: write
+  actions: read # to correlate lock age against recent workflow runs
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # No `environment:` here on purpose - this is a read-only detector
+    # that must run unattended on a schedule, so it can't sit behind a
+    # human-approval gate. See bootstrap/main.tf for the role's scope
+    # (dynamodb:GetItem on the lock table, nothing else).
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LOCK_MONITOR_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-lock-doctor-${{ github.run_id }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r agents/lock-doctor/requirements.txt
+
+      - name: Check for stuck locks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python agents/lock-doctor/check_lock.py \
+            --state-bucket "${{ vars.TF_STATE_BUCKET }}" \
+            --lock-table "${{ vars.TF_LOCK_TABLE }}" \
+            --envs "dev,staging,prod" \
+            --anthropic-api-key "${{ secrets.ANTHROPIC_API_KEY }}"
