@@ -1,8 +1,13 @@
 name: lock-doctor
 
 on:
-  schedule:
-    - cron: "*/30 * * * *"
+  # schedule trigger disabled 2026-07-17: the bootstrap AWS infra (OIDC
+  # provider, lock-monitor role, state bucket, lock table) was torn down
+  # intentionally, so every scheduled run fails at OIDC token validation.
+  # Re-add the schedule block once `terraform apply` in bootstrap/ has
+  # been re-run and the repo variables below point at live resources.
+  # schedule:
+  #   - cron: "*/30 * * * *"
   workflow_run:
     workflows: ["terraform-apply", "terraform-plan"]
     types: [completed]
